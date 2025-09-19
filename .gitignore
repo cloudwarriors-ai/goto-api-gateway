@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+
+# Env & credentials
+.env
+.env.*
+!.env-template
+
+# Virtual env
+venv/
+
+# Logs & debug
+logs/
+*.log
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Local archives & experiments
+archive/
+debug/
+openapi-spec/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,197 @@
+{
+  "info": {
+    "name": "GoTo API Gateway (FastAPI) Workflow",
+    "_postman_id": "4f5b6b1a-1b8e-4b8f-9a90-0bf4bd90c0a9",
+    "description": "Collection to exercise the FastAPI gateway with dynamic CDP authentication (MFA-aware).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Workflow: Voice Call Queues",
+      "item": [
+        {
+          "name": "Health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "postman.setNextRequest('Auth Status');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Auth Status",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/auth/status"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "postman.setNextRequest('Call Queues Baseline');"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Call Queues Baseline",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/call-queues?accountKey={{accountKey}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  pm.test('Voice API already working', () => true);",
+                  "  postman.setNextRequest(null);",
+                  "} else {",
+                  "  pm.test('Voice API needs auth (expected in baseline)', () => pm.response.code >= 400);",
+                  "  postman.setNextRequest('CDP Login (Voice Scope)');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "CDP Login (Voice Scope)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\",\n  \"scopes\": [\"{{voice_scope}}\"],\n  \"verification_code\": \"{{verification_code}}\",\n  \"cdp_url\": \"{{cdp_url}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/cdp-login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200 or MFA required', () => pm.response.code === 200 || pm.response.code === 400);",
+                  "let data = {}; try { data = pm.response.json(); } catch(e) {}",
+                  "if (data && data.mfa_required) {",
+                  "  pm.test('MFA required - set verification_code and rerun this request', () => false);",
+                  "  postman.setNextRequest(null);",
+                  "} else if (data && data.success === false) {",
+                  "  pm.test('Auth failed: ' + (data.error || 'unknown'), () => false);",
+                  "  postman.setNextRequest(null);",
+                  "} else {",
+                  "  postman.setNextRequest('Call Queues After');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Call Queues After",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/call-queues?accountKey={{accountKey}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200 after auth', () => pm.response.to.have.status(200));",
+                  "postman.setNextRequest(null);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Direct Calls",
+      "item": [
+        {
+          "name": "Auth: CDP Login (no MFA)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\",\n  \"scopes\": [\"{{voice_scope}}\"],\n  \"cdp_url\": \"{{cdp_url}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/cdp-login"
+          }
+        },
+        {
+          "name": "Auth: CDP Login (with MFA)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"{{username}}\",\n  \"password\": \"{{password}}\",\n  \"verification_code\": \"{{verification_code}}\",\n  \"scopes\": [\"{{voice_scope}}\"],\n  \"cdp_url\": \"{{cdp_url}}\"\n}"
+            },
+            "url": "{{baseUrl}}/auth/cdp-login"
+          }
+        },
+        {
+          "name": "Health",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/health" }
+        },
+        {
+          "name": "Auth Status",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/auth/status" }
+        },
+        {
+          "name": "Voice: Call Queues",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/call-queues?accountKey={{accountKey}}"
+          }
+        },
+        {
+          "name": "Admin: Me",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/me" }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "accountKey", "value": "4266846632996939781" },
+    { "key": "username", "value": "doug.ruby@cloudwarriors.ai" },
+    { "key": "password", "value": "P@$$w0rd!" },
+    { "key": "verification_code", "value": "" },
+    { "key": "cdp_url", "value": "http://127.0.0.1:9222" },
+    { "key": "voice_scope", "value": "voice-admin.v1.read" }
+  ]
+}
