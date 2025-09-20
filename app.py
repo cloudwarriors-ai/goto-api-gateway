@@ -4,12 +4,13 @@ import os
 from typing import Optional, List
 
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from auth_manager import get_auth_manager
 
-app = FastAPI(title="GoTo API Gateway (FastAPI)", version="1.1.0")
+app = FastAPI(title="GoTo API Gateway (FastAPI)", version="1.2.0")
 auth_manager = get_auth_manager()
 
 ADMIN_BASE_URL = "https://api.getgo.com/admin/rest/v1"
@@ -23,6 +24,7 @@ class CDPLoginBody(BaseModel):
     verification_code: Optional[str] = None
     scopes: Optional[List[str]] = None
     cdp_url: Optional[str] = "http://127.0.0.1:9222"  # Fallback if no managed browser
+    use_cdp: Optional[bool] = False  # Force CDP even if managed browser exists
 
 
 @app.on_event("startup")
@@ -256,8 +258,11 @@ async def cdp_login(body: CDPLoginBody):
                 except Exception:
                     pass
 
-    # Prefer managed headless browser; fall back to CDP endpoint
-    if getattr(app.state, "browser", None) is not None:
+    # Prefer managed headless browser; allow forcing CDP; fall back to CDP when missing
+    if body.use_cdp:
+        print("ℹ️ Forcing CDP path for authentication")
+        auth_result = await run_with_cdp()
+    elif getattr(app.state, "browser", None) is not None:
         auth_result = await run_with_managed_browser()
     else:
         print("ℹ️ Managed browser unavailable — falling back to CDP endpoint")
@@ -315,6 +320,214 @@ async def get_me():
         return r.json()
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===============================
+# Voice Auto Attendants Endpoints
+# ===============================
+
+@app.get("/autoattendants")
+async def list_auto_attendants(accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = {"accountKey": accountKey}
+    url = f"{VOICE_BASE_URL}/extensions"
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            # Infer auto attendants as extensions with type "DIAL_PLAN"
+            auto_attendants = [ext for ext in data.get("items", []) if ext.get("type") == "DIAL_PLAN"]
+            return {"items": auto_attendants}
+        return JSONResponse(content=(r.json() if r.text else {}), status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/autoattendants/{attendant_id}")
+async def get_auto_attendant(attendant_id: str, accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = {"accountKey": accountKey}
+    url = f"{VOICE_BASE_URL}/extensions"
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=30)
+        if r.status_code == 200:
+            data = r.json()
+            # Find the extension with matching id and type DIAL_PLAN
+            for ext in data.get("items", []):
+                if ext.get("id") == attendant_id and ext.get("type") == "DIAL_PLAN":
+                    return ext
+            return JSONResponse(content={"error": "Auto attendant not found"}, status_code=404)
+        return JSONResponse(content=(r.json() if r.text else {}), status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/autoattendants")
+async def create_auto_attendant(request: Request, accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = {"accountKey": accountKey}
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    url = f"{VOICE_BASE_URL}/autoattendants"
+    try:
+        r = requests.post(url, headers=headers, params=params, json=body, timeout=60)
+        content = None
+        try:
+            content = r.json()
+        except Exception:
+            content = r.text
+        return JSONResponse(content=content, status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.put("/autoattendants/{attendant_id}")
+async def update_auto_attendant(attendant_id: str, request: Request, accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = {"accountKey": accountKey}
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    url = f"{VOICE_BASE_URL}/autoattendants/{attendant_id}"
+    try:
+        r = requests.put(url, headers=headers, params=params, json=body, timeout=60)
+        content = None
+        try:
+            content = r.json()
+        except Exception:
+            content = r.text
+        return JSONResponse(content=content, status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/autoattendants/{attendant_id}")
+async def delete_auto_attendant(attendant_id: str, accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = {"accountKey": accountKey}
+    url = f"{VOICE_BASE_URL}/autoattendants/{attendant_id}"
+    try:
+        r = requests.delete(url, headers=headers, params=params, timeout=30)
+        content = None
+        try:
+            content = r.json()
+        except Exception:
+            content = r.text
+        return JSONResponse(content=content, status_code=r.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ===============================
+# Generic Proxy Endpoints
+# ===============================
+
+@app.api_route("/admin-proxy/{api_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def admin_proxy(api_path: str, request: Request):
+    token = auth_manager.get_valid_token("admin")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid admin token available")
+
+    url = f"{ADMIN_BASE_URL}/{api_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = dict(request.query_params)
+
+    data = None
+    if request.method in {"POST", "PUT", "PATCH"}:
+        try:
+            data = await request.json()
+        except Exception:
+            data = None
+
+    try:
+        resp = requests.request(request.method, url, headers=headers, params=params, json=data, timeout=60)
+        content = None
+        try:
+            content = resp.json()
+        except Exception:
+            content = resp.text
+        return JSONResponse(content=content, status_code=resp.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.api_route("/voice-proxy/{api_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def voice_proxy(api_path: str, request: Request):
+    token = auth_manager.get_valid_token("voice")
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid voice token available (scope voice-admin.*)")
+
+    url = f"{VOICE_BASE_URL}/{api_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = dict(request.query_params)
+    if "accountKey" not in params:
+        params["accountKey"] = DEFAULT_ACCOUNT_KEY
+
+    data = None
+    if request.method in {"POST", "PUT", "PATCH"}:
+        try:
+            data = await request.json()
+        except Exception:
+            data = None
+
+    try:
+        resp = requests.request(request.method, url, headers=headers, params=params, json=data, timeout=60)
+        content = None
+        try:
+            content = resp.json()
+        except Exception:
+            content = resp.text
+        return JSONResponse(content=content, status_code=resp.status_code)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

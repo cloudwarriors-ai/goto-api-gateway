@@ -183,15 +183,45 @@
           "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/me" }
         }
       ]
+    },
+    {
+      "name": "Generic Proxies",
+      "item": [
+        {
+          "name": "Admin Proxy: Me",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/admin-proxy/me" }
+        },
+        {
+          "name": "Admin Proxy: Account",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/admin-proxy/accounts/{{accountKey}}" }
+        },
+        {
+          "name": "Voice Proxy: Call Queues",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/voice-proxy/call-queues?accountKey={{accountKey}}" }
+        },
+        {
+          "name": "Voice Proxy: Extensions",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/voice-proxy/extensions?accountKey={{accountKey}}" }
+        },
+        {
+          "name": "Voice: Auto Attendants (list)",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/autoattendants?accountKey={{accountKey}}" }
+        },
+        {
+          "name": "Voice: Auto Attendant (get)",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/autoattendants/{{autoAttendantId}}?accountKey={{accountKey}}" }
+        }
+      ]
     }
   ],
   "variable": [
-    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "baseUrl", "value": "http://127.0.0.1:8011" },
     { "key": "accountKey", "value": "4266846632996939781" },
     { "key": "username", "value": "doug.ruby@cloudwarriors.ai" },
     { "key": "password", "value": "P@$$w0rd!" },
     { "key": "verification_code", "value": "" },
     { "key": "cdp_url", "value": "http://127.0.0.1:9222" },
-    { "key": "voice_scope", "value": "voice-admin.v1.read" }
+    { "key": "voice_scope", "value": "voice-admin.v1.read" },
+    { "key": "autoAttendantId", "value": "replace-with-id" }
   ]
 }
