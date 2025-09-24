@@ -5,6 +5,7 @@ import base64
 import os
 import time
 import urllib.parse
+import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv, set_key
 
@@ -17,6 +18,22 @@ except ImportError:
     print("⚠️  Playwright not available. Install with: pip install playwright")
 
 load_dotenv()
+
+def get_token_expiry(token):
+    """Extract expiry datetime from JWT token"""
+    if not token:
+        return None
+    try:
+        payload = token.split('.')[1]
+        payload += '=' * (4 - len(payload) % 4)  # pad for base64
+        decoded = base64.urlsafe_b64decode(payload)
+        data = json.loads(decoded.decode('utf-8'))
+        exp = data.get('exp')
+        if exp:
+            return datetime.fromtimestamp(exp)
+    except Exception:
+        pass
+    return None
 
 class GoToAuthManager:
     """Centralized authentication manager for GoTo APIs with Playwright automation"""
@@ -33,10 +50,13 @@ class GoToAuthManager:
         self.admin_refresh_token = os.getenv('REFRESH_TOKEN')
         self.voice_access_token = os.getenv('VOICE_ACCESS_TOKEN')
         self.voice_refresh_token = os.getenv('VOICE_REFRESH_TOKEN')
-        
-        # Token expiry tracking
-        self.admin_token_expiry = None
-        self.voice_token_expiry = None
+        self.scim_access_token = os.getenv('SCIM_ACCESS_TOKEN')
+        self.scim_refresh_token = os.getenv('SCIM_REFRESH_TOKEN')
+
+        # Token expiry tracking - parse from tokens
+        self.admin_token_expiry = get_token_expiry(self.admin_access_token)
+        self.voice_token_expiry = get_token_expiry(self.voice_access_token)
+        self.scim_token_expiry = get_token_expiry(self.scim_access_token)
     
     def get_oauth_url(self, scopes=None):
         """Generate OAuth authorization URL"""
@@ -109,6 +129,15 @@ class GoToAuthManager:
                     os.environ['VOICE_ACCESS_TOKEN'] = access_token
                     if refresh_token:
                         os.environ['VOICE_REFRESH_TOKEN'] = refresh_token
+                elif 'identity:scim.org' in scope:
+                    self.scim_access_token = access_token
+                    self.scim_refresh_token = refresh_token
+                    self.scim_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
+                    
+                    # Update environment variables in running process
+                    os.environ['SCIM_ACCESS_TOKEN'] = access_token
+                    if refresh_token:
+                        os.environ['SCIM_REFRESH_TOKEN'] = refresh_token
                 else:
                     self.admin_access_token = access_token
                     self.admin_refresh_token = refresh_token
@@ -143,8 +172,10 @@ class GoToAuthManager:
         """Refresh access token using refresh token"""
         if token_type == 'admin':
             refresh_token = self.admin_refresh_token
-        else:
+        elif token_type == 'voice':
             refresh_token = self.voice_refresh_token
+        else:  # scim
+            refresh_token = self.scim_refresh_token
         
         if not refresh_token:
             return {'success': False, 'error': 'No refresh token available'}
@@ -180,7 +211,7 @@ class GoToAuthManager:
                     set_key('.env', 'ACCESS_TOKEN', access_token)
                     if new_refresh_token:
                         set_key('.env', 'REFRESH_TOKEN', new_refresh_token)
-                else:
+                elif token_type == 'voice':
                     self.voice_access_token = access_token
                     if new_refresh_token:
                         self.voice_refresh_token = new_refresh_token
@@ -189,6 +220,15 @@ class GoToAuthManager:
                     set_key('.env', 'VOICE_ACCESS_TOKEN', access_token)
                     if new_refresh_token:
                         set_key('.env', 'VOICE_REFRESH_TOKEN', new_refresh_token)
+                else:  # scim
+                    self.scim_access_token = access_token
+                    if new_refresh_token:
+                        self.scim_refresh_token = new_refresh_token
+                    self.scim_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
+                    
+                    set_key('.env', 'SCIM_ACCESS_TOKEN', access_token)
+                    if new_refresh_token:
+                        set_key('.env', 'SCIM_REFRESH_TOKEN', new_refresh_token)
                 
                 return {
                     'success': True,
@@ -213,9 +253,12 @@ class GoToAuthManager:
         if token_type == 'admin':
             current_token = self.admin_access_token
             expiry = self.admin_token_expiry
-        else:
+        elif token_type == 'voice':
             current_token = self.voice_access_token
             expiry = self.voice_token_expiry
+        else:  # scim
+            current_token = self.scim_access_token
+            expiry = self.scim_token_expiry
         
         # Check if token needs refresh
         if not current_token or (expiry and datetime.now() >= expiry):

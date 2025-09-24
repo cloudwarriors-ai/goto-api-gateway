@@ -15,6 +15,7 @@ auth_manager = get_auth_manager()
 
 ADMIN_BASE_URL = "https://api.getgo.com/admin/rest/v1"
 VOICE_BASE_URL = "https://api.jive.com/voice-admin/v1"
+SCIM_BASE_URL = "https://api.getgo.com/identity/v1"
 DEFAULT_ACCOUNT_KEY = "4266846632996939781"
 
 
@@ -512,6 +513,39 @@ async def voice_proxy(api_path: str, request: Request):
     params = dict(request.query_params)
     if "accountKey" not in params:
         params["accountKey"] = DEFAULT_ACCOUNT_KEY
+
+    data = None
+    if request.method in {"POST", "PUT", "PATCH"}:
+        try:
+            data = await request.json()
+        except Exception:
+            data = None
+
+    try:
+        resp = requests.request(request.method, url, headers=headers, params=params, json=data, timeout=60)
+        content = None
+        try:
+            content = resp.json()
+        except Exception:
+            content = resp.text
+        return JSONResponse(content=content, status_code=resp.status_code)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.api_route("/scim-proxy/{api_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def scim_proxy(api_path: str, request: Request):
+    token = auth_manager.get_valid_token("scim")  # SCIM uses token with identity:scim.org scope
+    if not token:
+        raise HTTPException(status_code=401, detail="No valid SCIM token available")
+
+    url = f"{SCIM_BASE_URL}/{api_path}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    params = dict(request.query_params)
 
     data = None
     if request.method in {"POST", "PUT", "PATCH"}:
