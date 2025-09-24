@@ -79,7 +79,7 @@ class GoToAuthManager:
         base_url = "https://authentication.logmeininc.com/oauth/authorize"
         query_parts = [
             f"client_id={params['client_id']}",
-            f"redirect_uri=http%3A%2F%2Flocalhost%3A9111",  # Properly encoded
+            f"redirect_uri={urllib.parse.quote(self.redirect_uri)}",
             f"response_type={params['response_type']}",
             f"state={params['state']}"
         ]
@@ -119,31 +119,34 @@ class GoToAuthManager:
                 expires_in = token_data.get('expires_in', 3600)
                 scope = token_data.get('scope', '')
                 
-                # Determine token type based on scope
+                # Determine token type based on scope - can have multiple
                 if 'voice-admin' in scope:
                     self.voice_access_token = access_token
                     self.voice_refresh_token = refresh_token
                     self.voice_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-                    
+
                     # Update environment variables in running process
                     os.environ['VOICE_ACCESS_TOKEN'] = access_token
                     if refresh_token:
                         os.environ['VOICE_REFRESH_TOKEN'] = refresh_token
-                elif 'identity:scim.org' in scope:
+
+                if 'identity:scim.org' in scope:
                     self.scim_access_token = access_token
                     self.scim_refresh_token = refresh_token
                     self.scim_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-                    
+
                     # Update environment variables in running process
                     os.environ['SCIM_ACCESS_TOKEN'] = access_token
                     if refresh_token:
                         os.environ['SCIM_REFRESH_TOKEN'] = refresh_token
-                else:
+
+                # Default to admin if no specific scope
+                if not ('voice-admin' in scope or 'identity:scim.org' in scope):
                     self.admin_access_token = access_token
                     self.admin_refresh_token = refresh_token
                     self.admin_token_expiry = datetime.now() + timedelta(seconds=expires_in - 300)
-                    
-                    # Update environment variables in running process  
+
+                    # Update environment variables in running process
                     os.environ['ACCESS_TOKEN'] = access_token
                     if refresh_token:
                         os.environ['REFRESH_TOKEN'] = refresh_token
@@ -309,16 +312,15 @@ class GoToAuthManager:
                 if 'oauth/approve' in page.url:
                     print("✅ Already authenticated, on consent page")
                 else:
-                    # Fill email
+                    # Fill email and password
                     print("📧 Entering email...")
-                    print(f"🔍 Looking for email input field...")
                     page.fill('input[name="username"], input[type="email"], input[placeholder*="email" i]', self.login_email)
-                    page.click('button:has-text("Next"), input[type="submit"], button[type="submit"]')
-                    page.wait_for_load_state('networkidle')
+                    page.wait_for_timeout(1000)  # Wait for password field to appear
                     
-                    # Fill password
                     print("🔑 Entering password...")
                     page.fill('input[name="password"], input[type="password"]', self.login_password)
+                    
+                    # Click sign in
                     page.click('button:has-text("Sign in"), input[type="submit"], button[type="submit"]')
                     page.wait_for_load_state('networkidle')
                     
