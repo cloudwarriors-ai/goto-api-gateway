@@ -10,19 +10,95 @@ import json
 from datetime import datetime, timedelta
 
 load_dotenv()
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from provider_manager import get_provider_manager
 
-# from auth_manager import get_auth_manager
-
-app = FastAPI(title="GoTo API Gateway (FastAPI)", version="1.2.0")
-# auth_manager = get_auth_manager()
+app = FastAPI(title="GoTo API Gateway (FastAPI)", version="2.0.0")
+pm = get_provider_manager()
 
 ADMIN_BASE_URL = "https://api.getgo.com/admin/rest/v1"
 VOICE_BASE_URL = "https://api.jive.com/voice-admin/v1"
 SCIM_BASE_URL = "https://api.getgo.com/identity/v1"
 DEFAULT_ACCOUNT_KEY = "4266846632996939781"
+DEFAULT_TENANT_ID = "cloudwarriors"
+
+
+def get_provider_credentials(tenant_id: str, provider: str):
+    provider_data = pm.get_provider(tenant_id, provider)
+    if not provider_data:
+        raise HTTPException(status_code=404, detail=f"Provider {provider} not found for tenant {tenant_id}")
+    
+    if provider_data.get('status') != 'active':
+        raise HTTPException(status_code=403, detail=f"Provider {provider} is not active")
+    
+    return provider_data
+
+
+def get_goto_token(tenant_id: str = DEFAULT_TENANT_ID):
+    provider_data = get_provider_credentials(tenant_id, 'goto')
+    token = provider_data.get('access_token')
+    token_expiry = provider_data.get('token_expiry')
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="No GoTo access token available")
+    
+    if token_expiry:
+        try:
+            expiry_dt = datetime.fromisoformat(token_expiry.replace('Z', '+00:00'))
+            now_dt = datetime.now(expiry_dt.tzinfo)
+            
+            if now_dt >= expiry_dt:
+                print(f"🔄 Token expired, refreshing for tenant {tenant_id}...")
+                refresh_result = refresh_goto_token(tenant_id)
+                if refresh_result['success']:
+                    provider_data = get_provider_credentials(tenant_id, 'goto')
+                    token = provider_data.get('access_token')
+                else:
+                    raise HTTPException(status_code=401, detail="Token refresh failed")
+        except Exception as e:
+            print(f"⚠️  Token expiry check failed: {e}")
+    
+    return token
+
+
+def refresh_goto_token(tenant_id: str):
+    try:
+        provider_data = pm.get_provider(tenant_id, 'goto')
+        if not provider_data:
+            return {"success": False, "error": "Provider not found"}
+        
+        token_url = 'https://identity.goto.com/oauth/token'
+        token_data = {
+            'grant_type': 'refresh_token',
+            'refresh_token': provider_data['refresh_token'],
+        }
+        
+        auth_string = base64.b64encode(f"{provider_data['client_id']}:{provider_data['client_secret']}".encode()).decode()
+        headers = {
+            'Authorization': f'Basic {auth_string}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        response = requests.post(token_url, data=token_data, headers=headers)
+        
+        if response.status_code == 200:
+            token_response = response.json()
+            access_token = token_response['access_token']
+            new_refresh_token = token_response.get('refresh_token', provider_data['refresh_token'])
+            expires_in = token_response.get('expires_in', 3600)
+            expires_at = (datetime.now() + timedelta(seconds=expires_in)).isoformat() + 'Z'
+            
+            pm.update_tokens(tenant_id, 'goto', access_token, new_refresh_token, expires_at)
+            
+            print(f"✅ Token refreshed successfully for tenant {tenant_id}")
+            return {"success": True, "expires_in": expires_in, "expires_at": expires_at}
+        else:
+            return {"success": False, "error": response.text}
+            
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def exchange_code_for_token(code):
@@ -175,14 +251,33 @@ async def root(code: str = Query(None), state: str = Query(None)):
 
 
 @app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "admin_token_available": bool(os.getenv("ACCESS_TOKEN")),
-        "voice_token_available": bool(os.getenv("VOICE_ACCESS_TOKEN")),
-        "scim_token_available": bool(os.getenv("SCIM_ACCESS_TOKEN")),
-        "account_key": DEFAULT_ACCOUNT_KEY,
-    }
+async def health(tenant_id: str = Query(DEFAULT_TENANT_ID)):
+    try:
+        providers = pm.get_all_providers(tenant_id)
+        provider_status = {}
+        
+        for provider in providers:
+            provider_data = pm.get_provider(tenant_id, provider)
+            if provider_data:
+                provider_status[provider] = {
+                    "status": provider_data.get("status"),
+                    "has_token": bool(provider_data.get("access_token")),
+                    "token_expiry": provider_data.get("token_expiry"),
+                }
+        
+        return {
+            "status": "healthy",
+            "tenant_id": tenant_id,
+            "providers": provider_status,
+            "account_key": DEFAULT_ACCOUNT_KEY,
+        }
+    except Exception as e:
+        return {
+            "status": "healthy",
+            "tenant_id": tenant_id,
+            "providers": {},
+            "error": str(e),
+        }
 
 
 @app.get("/auth/status")
@@ -373,18 +468,20 @@ async def auth_status():
 
 
 @app.get("/call-queues")
-async def list_call_queues(accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY)):
-    token = os.getenv("VOICE_ACCESS_TOKEN") or os.getenv("ACCESS_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="No valid token available")
+async def list_call_queues(
+    accountKey: Optional[str] = Query(DEFAULT_ACCOUNT_KEY),
+    tenant_id: str = Query(DEFAULT_TENANT_ID)
+):
+    token = get_goto_token(tenant_id)
+    provider_data = get_provider_credentials(tenant_id, 'goto')
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    params = {"accountKey": accountKey}
-    url = f"{VOICE_BASE_URL}/call-queues"
+    params = {"accountKey": provider_data.get('account_key', accountKey)}
+    url = f"{provider_data.get('api_base_url', VOICE_BASE_URL)}/call-queues"
     try:
         r = requests.get(url, headers=headers, params=params, timeout=30)
         if r.status_code == 401:
@@ -593,20 +690,21 @@ async def admin_proxy(api_path: str, request: Request):
 
 
 @app.api_route("/voice-proxy/{api_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
-async def voice_proxy(api_path: str, request: Request):
-    token = os.getenv("VOICE_ACCESS_TOKEN")
-    if not token:
-        raise HTTPException(status_code=401, detail="No valid voice token available (scope voice-admin.*)")
+async def voice_proxy(api_path: str, request: Request, tenant_id: str = Query(DEFAULT_TENANT_ID)):
+    token = get_goto_token(tenant_id)
+    provider_data = get_provider_credentials(tenant_id, 'goto')
 
-    url = f"{VOICE_BASE_URL}/{api_path}"
+    url = f"{provider_data.get('api_base_url', VOICE_BASE_URL)}/{api_path}"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
     params = dict(request.query_params)
+    if "tenant_id" in params:
+        del params["tenant_id"]
     if "accountKey" not in params:
-        params["accountKey"] = DEFAULT_ACCOUNT_KEY
+        params["accountKey"] = provider_data.get('account_key', DEFAULT_ACCOUNT_KEY)
 
     data = None
     if request.method in {"POST", "PUT", "PATCH"}:
@@ -660,7 +758,89 @@ async def scim_proxy(api_path: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/tenants/{tenant_id}/providers")
+async def list_tenant_providers(tenant_id: str):
+    try:
+        providers = pm.get_all_providers(tenant_id)
+        provider_list = []
+        
+        for provider in providers:
+            provider_data = pm.get_provider(tenant_id, provider)
+            if provider_data:
+                provider_list.append({
+                    "provider": provider,
+                    "status": provider_data.get("status"),
+                    "auth_type": provider_data.get("auth_type"),
+                    "account_key": provider_data.get("account_key"),
+                    "has_token": bool(provider_data.get("access_token")),
+                    "token_expiry": provider_data.get("token_expiry"),
+                    "features_enabled": provider_data.get("features_enabled"),
+                    "created_at": provider_data.get("created_at"),
+                    "updated_at": provider_data.get("updated_at"),
+                })
+        
+        return {"tenant_id": tenant_id, "providers": provider_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tenants/{tenant_id}/providers/{provider}")
+async def get_tenant_provider(tenant_id: str, provider: str):
+    try:
+        provider_data = pm.get_provider(tenant_id, provider)
+        if not provider_data:
+            raise HTTPException(status_code=404, detail=f"Provider {provider} not found for tenant {tenant_id}")
+        
+        provider_data.pop("client_secret", None)
+        provider_data.pop("access_token", None)
+        provider_data.pop("refresh_token", None)
+        
+        return {"tenant_id": tenant_id, "provider": provider, "config": provider_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/tenants/{tenant_id}/config")
+async def get_tenant_config(tenant_id: str):
+    try:
+        config = pm.get_tenant_config(tenant_id)
+        if not config:
+            raise HTTPException(status_code=404, detail=f"Tenant {tenant_id} not found")
+        
+        return {"tenant_id": tenant_id, "config": config}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tenants/{tenant_id}/providers/{provider}/refresh-token")
+async def refresh_provider_token(tenant_id: str, provider: str):
+    try:
+        if provider != 'goto':
+            raise HTTPException(status_code=400, detail=f"Token refresh not implemented for provider: {provider}")
+        
+        result = refresh_goto_token(tenant_id)
+        
+        if result['success']:
+            return {
+                "success": True,
+                "message": "Token refreshed successfully",
+                "expires_in": result.get('expires_in'),
+                "expires_at": result.get('expires_at')
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Token refresh failed: {result.get('error')}")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
-    print("🟢 Starting GoTo API Gateway (FastAPI) on http://localhost:9111")
-    uvicorn.run("app:app", host="0.0.0.0", port=9111, reload=True)
+    print("🟢 Starting GoTo API Gateway (FastAPI) v2.0 on http://localhost:8078")
+    uvicorn.run("app:app", host="0.0.0.0", port=8078, reload=True)
