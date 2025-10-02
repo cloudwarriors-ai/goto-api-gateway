@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import logging
 from typing import Optional, List
 
 import requests
@@ -10,13 +11,57 @@ import json
 from datetime import datetime, timedelta
 
 load_dotenv()
-from fastapi import FastAPI, HTTPException, Query, Request, Header
+from fastapi import FastAPI, HTTPException, Query, Request, Header, Depends
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from provider_manager import get_provider_manager
+from session_manager import SessionManager
 
-app = FastAPI(title="GoTo API Gateway (FastAPI)", version="2.0.0")
+logging.basicConfig(
+    level=os.getenv('LOG_LEVEL', 'INFO'),
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(
+    title="GoTo API Gateway",
+    version="2.0.0",
+    description="""
+A FastAPI-based gateway providing session-based authenticated access 
+to the GoTo Admin and Voice API with automatic token refresh.
+
+## Features
+- 🔐 Session-based authentication (5-minute TTL)
+- 🔄 Automatic token refresh
+- 🚀 Comprehensive API coverage (Admin, Voice, SCIM)
+- 🎯 Generic proxy endpoints for any GoTo API call
+- 📊 Multi-tenant support with Redis-backed credential storage
+
+## Authentication Flow
+1. Seed credentials in Redis (tenant/system/provider)
+2. POST /auth/connect to create a session
+3. Use session_id in subsequent API calls
+4. POST /auth/disconnect when done (or let TTL expire)
+
+## Common API Endpoints
+### Users (Extensions)
+- GET /voice-proxy/extensions - List all users/extensions (type=DIRECT_EXTENSION)
+- GET /voice-proxy/extensions?type=CALL_QUEUE - List call queues
+- GET /voice-proxy/extensions?type=DIAL_PLAN - List auto-attendants
+
+### Account Info
+- GET /voice-proxy/accounts/{account_key} - Get account details
+""",
+    contact={
+        "name": "GoTo Gateway Team"
+    },
+    license_info={
+        "name": "MIT"
+    }
+)
 pm = get_provider_manager()
+sm = SessionManager(pm.redis_client)
 
 ADMIN_BASE_URL = "https://api.getgo.com/admin/rest/v1"
 VOICE_BASE_URL = "https://api.jive.com/voice-admin/v1"
@@ -50,7 +95,7 @@ def get_goto_token(tenant_id: str = DEFAULT_TENANT_ID):
             now_dt = datetime.now(expiry_dt.tzinfo)
             
             if now_dt >= expiry_dt:
-                print(f"🔄 Token expired, refreshing for tenant {tenant_id}...")
+                logger.info(f"Token expired, refreshing for tenant {tenant_id}...")
                 refresh_result = refresh_goto_token(tenant_id)
                 if refresh_result['success']:
                     provider_data = get_provider_credentials(tenant_id, 'goto')
@@ -58,7 +103,7 @@ def get_goto_token(tenant_id: str = DEFAULT_TENANT_ID):
                 else:
                     raise HTTPException(status_code=401, detail="Token refresh failed")
         except Exception as e:
-            print(f"⚠️  Token expiry check failed: {e}")
+            logger.warning(f"Token expiry check failed: {e}")
     
     return token
 
@@ -92,7 +137,7 @@ def refresh_goto_token(tenant_id: str):
             
             pm.update_tokens(tenant_id, 'goto', access_token, new_refresh_token, expires_at)
             
-            print(f"✅ Token refreshed successfully for tenant {tenant_id}")
+            logger.info(f"Token refreshed successfully for tenant {tenant_id}")
             return {"success": True, "expires_in": expires_in, "expires_at": expires_at}
         else:
             return {"success": False, "error": response.text}
@@ -179,8 +224,164 @@ class CDPLoginBody(BaseModel):
     password: Optional[str] = None
     verification_code: Optional[str] = None
     scopes: Optional[List[str]] = None
-    cdp_url: Optional[str] = "http://127.0.0.1:9222"  # Fallback if no managed browser
-    use_cdp: Optional[bool] = False  # Force CDP even if managed browser exists
+    cdp_url: Optional[str] = "http://127.0.0.1:9222"
+    use_cdp: Optional[bool] = False
+
+
+class ConnectRequest(BaseModel):
+    tenant: str = Field(..., min_length=1, max_length=100, description="Tenant identifier")
+    app: str = Field(..., min_length=1, max_length=100, description="Application identifier")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "tenant": "cloudwarriors",
+                "app": "goto-gw"
+            }
+        }
+
+
+class ConnectResponseData(BaseModel):
+    session_id: str = Field(..., description="UUID of created session")
+    tenant: str = Field(..., description="Tenant identifier")
+    app: str = Field(..., description="Application identifier")
+    expires_in: int = Field(300, description="Session TTL in seconds")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "tenant": "cloudwarriors",
+                "app": "goto-gw",
+                "expires_in": 300
+            }
+        }
+
+
+class ConnectResponse(BaseModel):
+    success: bool = Field(True, description="Operation success flag")
+    data: ConnectResponseData
+    message: str = Field(..., description="Human-readable result message")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "data": {
+                    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "tenant": "cloudwarriors",
+                    "app": "goto-gw",
+                    "expires_in": 300
+                },
+                "message": "GoTo session created successfully"
+            }
+        }
+
+
+class DisconnectResponse(BaseModel):
+    success: bool = Field(..., description="Operation success flag")
+    message: str = Field(..., description="Human-readable result message")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "message": "Session disconnected successfully"
+            }
+        }
+
+
+class StatusResponseData(BaseModel):
+    admin_authenticated: bool = Field(False, description="Admin API authentication status")
+    voice_authenticated: bool = Field(False, description="Voice API authentication status")
+    scim_authenticated: bool = Field(False, description="SCIM API authentication status")
+    tenant: Optional[str] = Field(None, description="Tenant identifier from session")
+    app: Optional[str] = Field(None, description="Application identifier from session")
+    session_id: Optional[str] = Field(None, description="Session UUID if validated")
+    expires_at: Optional[str] = Field(None, description="Session expiry timestamp (ISO 8601)")
+    provider_token_expiry: Optional[str] = Field(None, description="Provider token expiry (ISO 8601)")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "admin_authenticated": False,
+                "voice_authenticated": True,
+                "scim_authenticated": False,
+                "tenant": "cloudwarriors",
+                "app": "goto-gw",
+                "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "expires_at": "2025-10-02T18:20:23Z",
+                "provider_token_expiry": "2025-10-02T19:00:00Z"
+            }
+        }
+
+
+class StatusResponse(BaseModel):
+    success: bool = Field(True, description="Operation success flag")
+    data: StatusResponseData
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": True,
+                "data": {
+                    "admin_authenticated": False,
+                    "voice_authenticated": True,
+                    "scim_authenticated": False,
+                    "tenant": "cloudwarriors",
+                    "app": "goto-gw",
+                    "expires_at": "2025-10-02T18:20:23Z"
+                }
+            }
+        }
+
+
+class ErrorResponse(BaseModel):
+    success: bool = Field(False, description="Operation success flag")
+    error: str = Field(..., description="Error message")
+    detail: Optional[str] = Field(None, description="Detailed error information")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "success": False,
+                "error": "Session not found",
+                "detail": "Session 550e8400-e29b-41d4-a716-446655440000 does not exist or has expired"
+            }
+        }
+
+
+class SessionHeaders(BaseModel):
+    session_id: Optional[str] = None
+    tenant: Optional[str] = None
+    app: Optional[str] = None
+    system_client_id: Optional[str] = None
+    system_client_secret: Optional[str] = None
+    provider_access_token: Optional[str] = None
+    provider_refresh_token: Optional[str] = None
+    provider_account_key: Optional[str] = None
+
+
+async def extract_session_headers(
+    x_session_id: Optional[str] = Header(None, alias="X-Session-ID"),
+    x_tenant: Optional[str] = Header(None, alias="X-Tenant"),
+    x_app: Optional[str] = Header(None, alias="X-App"),
+    x_system_client_id: Optional[str] = Header(None, alias="X-System-Client-ID"),
+    x_system_client_secret: Optional[str] = Header(None, alias="X-System-Client-Secret"),
+    x_provider_access_token: Optional[str] = Header(None, alias="X-Provider-Access-Token"),
+    x_provider_refresh_token: Optional[str] = Header(None, alias="X-Provider-Refresh-Token"),
+    x_provider_account_key: Optional[str] = Header(None, alias="X-Provider-Account-Key")
+) -> SessionHeaders:
+    return SessionHeaders(
+        session_id=x_session_id,
+        tenant=x_tenant,
+        app=x_app,
+        system_client_id=x_system_client_id,
+        system_client_secret=x_system_client_secret,
+        provider_access_token=x_provider_access_token,
+        provider_refresh_token=x_provider_refresh_token,
+        provider_account_key=x_provider_account_key
+    )
 
 
 # @app.on_event("startup")
@@ -238,21 +439,27 @@ class CDPLoginBody(BaseModel):
 @app.get("/")
 async def root(code: str = Query(None), state: str = Query(None)):
     if code:
-        print(f"✅ Authorization code received: {code}")
-        # Exchange code for tokens
+        logger.info(f"Authorization code received: {code[:10]}...")
         result = exchange_code_for_token(code)
         if result.get("success"):
-            print("✅ Tokens exchanged and stored successfully")
+            logger.info("Tokens exchanged and stored successfully")
             return {"message": "Tokens exchanged successfully", "token_info": result}
         else:
-            print(f"❌ Token exchange failed: {result.get('error')}")
+            logger.error(f"Token exchange failed: {result.get('error')}")
             return {"message": "Token exchange failed", "error": result.get("error")}
     return {"message": "GoTo API Gateway"}
 
 
-@app.get("/health")
+@app.get("/health", tags=["Health"])
 async def health(tenant_id: str = Query(DEFAULT_TENANT_ID)):
     try:
+        redis_healthy = False
+        try:
+            pm.redis_client.ping()
+            redis_healthy = True
+        except Exception as redis_err:
+            logger.error(f"Redis health check failed: {redis_err}")
+        
         providers = pm.get_all_providers(tenant_id)
         provider_status = {}
         
@@ -268,28 +475,220 @@ async def health(tenant_id: str = Query(DEFAULT_TENANT_ID)):
         return {
             "status": "healthy",
             "tenant_id": tenant_id,
+            "redis_healthy": redis_healthy,
             "providers": provider_status,
             "account_key": DEFAULT_ACCOUNT_KEY,
         }
     except Exception as e:
+        logger.error(f"Health check error: {e}")
         return {
             "status": "healthy",
             "tenant_id": tenant_id,
+            "redis_healthy": False,
             "providers": {},
             "error": str(e),
         }
 
 
-@app.get("/auth/status")
-async def auth_status():
-    return {
-        "admin_authenticated": bool(os.getenv("ACCESS_TOKEN")),
-        "voice_authenticated": bool(os.getenv("VOICE_ACCESS_TOKEN")),
-        "scim_authenticated": bool(os.getenv("SCIM_ACCESS_TOKEN")),
-        "admin_expires": None,
-        "voice_expires": None,
-        "scim_expires": None,
-    }
+@app.post("/auth/connect",
+    response_model=ConnectResponse,
+    status_code=200,
+    responses={
+        200: {"description": "Session created successfully"},
+        400: {"description": "Invalid request body"},
+        404: {"description": "System credentials or provider tokens not found"},
+        500: {"description": "Internal server error"}
+    },
+    tags=["Authentication"]
+)
+async def auth_connect(body: ConnectRequest):
+    """
+    Issue a session for tenant/app using pre-seeded credentials in Redis.
+    
+    Creates a new session with 5-minute TTL bundling system credentials
+    and provider tokens for use by the Django API Gateway.
+    """
+    try:
+        system_creds = pm.get_system_credentials(body.tenant, body.app)
+        if not system_creds:
+            logger.warning(f"System credentials not found: tenant={body.tenant} app={body.app}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"System credentials not found for tenant={body.tenant} app={body.app}"
+            )
+        
+        provider_data = pm.get_provider(body.tenant, 'goto')
+        if not provider_data:
+            logger.warning(f"Provider 'goto' not found for tenant={body.tenant}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Provider 'goto' not found for tenant={body.tenant}"
+            )
+        
+        provider_tokens = {
+            'access_token': provider_data.get('access_token'),
+            'refresh_token': provider_data.get('refresh_token'),
+            'token_expiry': provider_data.get('token_expiry'),
+            'account_key': provider_data.get('account_key'),
+            'api_base_url': provider_data.get('api_base_url', VOICE_BASE_URL)
+        }
+        
+        session_data = sm.create_session(
+            tenant=body.tenant,
+            app=body.app,
+            system_creds=system_creds,
+            provider_tokens=provider_tokens
+        )
+        
+        logger.info(f"Session created: {session_data['session_id']} for tenant={body.tenant} app={body.app}")
+        
+        return ConnectResponse(
+            success=True,
+            data=ConnectResponseData(
+                session_id=session_data['session_id'],
+                tenant=body.tenant,
+                app=body.app,
+                expires_in=300
+            ),
+            message="GoTo session created successfully"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session creation error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/disconnect",
+    response_model=DisconnectResponse,
+    status_code=200,
+    responses={
+        200: {"description": "Session disconnected successfully"},
+        400: {"description": "Missing session_id parameter"},
+        404: {"description": "Session not found or already expired"},
+        500: {"description": "Internal server error"}
+    },
+    tags=["Authentication"]
+)
+async def auth_disconnect(session_id: str = Query(..., description="Session UUID to disconnect")):
+    """
+    Revoke a session by removing it from Redis.
+    
+    Once disconnected, the session_id becomes invalid and cannot be used
+    for authenticated requests. This is idempotent - calling multiple times
+    with the same session_id will return 404 after the first call.
+    """
+    try:
+        deleted = sm.delete_session(session_id)
+        
+        if deleted:
+            logger.info(f"Session disconnected: {session_id}")
+            return DisconnectResponse(
+                success=True,
+                message="Session disconnected successfully"
+            )
+        else:
+            logger.warning(f"Session not found: {session_id}")
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session not found: {session_id}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Session disconnect error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/auth/status",
+    response_model=StatusResponse,
+    status_code=200,
+    responses={
+        200: {"description": "Authentication status retrieved"},
+        401: {"description": "Invalid or expired session"},
+        500: {"description": "Internal server error"}
+    },
+    tags=["Authentication"]
+)
+async def auth_status(
+    session_id: Optional[str] = Query(None, description="Optional session UUID to validate"),
+    tenant_id: Optional[str] = Query(None, description="Optional tenant ID for provider status")
+):
+    """
+    Get authentication status for providers and optionally validate a session.
+    
+    Without session_id: Returns boolean flags for each provider's authentication state.
+    With session_id: Validates session and returns augmented data with tenant/app/expiry.
+    """
+    try:
+        if session_id:
+            session_data = sm.get_session(session_id)
+            
+            if not session_data:
+                logger.warning(f"Invalid session: {session_id}")
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Invalid or expired session: {session_id}"
+                )
+            
+            tenant = session_data.get('tenant')
+            app = session_data.get('app')
+            expires_at = session_data.get('expires_at')
+            
+            provider_tokens = session_data.get('provider_tokens', {})
+            has_access_token = bool(provider_tokens.get('access_token'))
+            token_expiry = provider_tokens.get('token_expiry')
+            
+            logger.info(f"Session validated: {session_id} tenant={tenant} app={app}")
+            
+            return StatusResponse(
+                success=True,
+                data=StatusResponseData(
+                    admin_authenticated=False,
+                    voice_authenticated=has_access_token,
+                    scim_authenticated=False,
+                    tenant=tenant,
+                    app=app,
+                    session_id=session_id,
+                    expires_at=expires_at,
+                    provider_token_expiry=token_expiry
+                )
+            )
+        
+        elif tenant_id:
+            try:
+                provider_data = pm.get_provider(tenant_id, 'goto')
+                has_token = bool(provider_data and provider_data.get('access_token'))
+                token_expiry = provider_data.get('token_expiry') if provider_data else None
+            except:
+                has_token = False
+                token_expiry = None
+            
+            return StatusResponse(
+                success=True,
+                data=StatusResponseData(
+                    admin_authenticated=False,
+                    voice_authenticated=has_token,
+                    scim_authenticated=False,
+                    tenant=tenant_id,
+                    provider_token_expiry=token_expiry
+                )
+            )
+        
+        else:
+            return StatusResponse(
+                success=True,
+                data=StatusResponseData(
+                    admin_authenticated=bool(os.getenv("ACCESS_TOKEN")),
+                    voice_authenticated=bool(os.getenv("VOICE_ACCESS_TOKEN")),
+                    scim_authenticated=bool(os.getenv("SCIM_ACCESS_TOKEN"))
+                )
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Status check error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # @app.post("/auth/cdp-login")
@@ -691,6 +1090,17 @@ async def admin_proxy(api_path: str, request: Request):
 
 @app.api_route("/voice-proxy/{api_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def voice_proxy(api_path: str, request: Request, tenant_id: str = Query(DEFAULT_TENANT_ID)):
+    """
+    Proxy endpoint for GoTo Voice Admin API.
+    
+    Common endpoints:
+    - extensions: List all extensions/users (filter by type: DIRECT_EXTENSION, CALL_QUEUE, DIAL_PLAN)
+    - accounts/{account_key}: Get account details
+    - lines: List phone lines
+    - call-queues: List call queues
+    
+    Example: GET /voice-proxy/extensions?session_id=xxx
+    """
     token = get_goto_token(tenant_id)
     provider_data = get_provider_credentials(tenant_id, 'goto')
 

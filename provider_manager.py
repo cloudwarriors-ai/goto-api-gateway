@@ -28,6 +28,12 @@ class ProviderManager:
     def get_providers_set_key(self, tenant_id: str) -> str:
         return f"tenant:{tenant_id}:providers"
     
+    def get_system_key(self, tenant_id: str, app: str) -> str:
+        return f"tenant:{tenant_id}:system:{app}"
+    
+    def get_systems_set_key(self, tenant_id: str) -> str:
+        return f"tenant:{tenant_id}:systems"
+    
     def add_provider(
         self,
         tenant_id: str,
@@ -170,6 +176,68 @@ class ProviderManager:
         
         data['data_retention_days'] = int(data.get('data_retention_days', 30))
         return data
+    
+    def add_system_credentials(
+        self,
+        tenant_id: str,
+        app: str,
+        config: Dict[str, Any]
+    ) -> bool:
+        system_key = self.get_system_key(tenant_id, app)
+        systems_set_key = self.get_systems_set_key(tenant_id)
+        
+        system_data = {
+            'client_id': str(config.get('client_id', '')),
+            'client_secret': str(config.get('client_secret', '')),
+            'redirect_uri': str(config.get('redirect_uri', '')),
+            'auth_url': str(config.get('auth_url', '')),
+            'token_url': str(config.get('token_url', '')),
+            'created_at': datetime.utcnow().isoformat() + 'Z',
+            'updated_at': datetime.utcnow().isoformat() + 'Z',
+        }
+        
+        self.redis_client.hset(system_key, mapping=system_data)
+        self.redis_client.sadd(systems_set_key, app)
+        
+        return True
+    
+    def get_system_credentials(self, tenant_id: str, app: str) -> Optional[Dict[str, Any]]:
+        system_key = self.get_system_key(tenant_id, app)
+        data = self.redis_client.hgetall(system_key)
+        
+        if not data:
+            return None
+        
+        return data
+    
+    def get_all_systems(self, tenant_id: str) -> List[str]:
+        systems_set_key = self.get_systems_set_key(tenant_id)
+        return list(self.redis_client.smembers(systems_set_key))
+    
+    def update_system_credentials(
+        self,
+        tenant_id: str,
+        app: str,
+        updates: Dict[str, Any]
+    ) -> bool:
+        system_key = self.get_system_key(tenant_id, app)
+        
+        if not self.redis_client.exists(system_key):
+            return False
+        
+        updates['updated_at'] = datetime.utcnow().isoformat() + 'Z'
+        
+        self.redis_client.hset(system_key, mapping=updates)
+        return True
+    
+    def delete_system_credentials(self, tenant_id: str, app: str) -> bool:
+        system_key = self.get_system_key(tenant_id, app)
+        systems_set_key = self.get_systems_set_key(tenant_id)
+        
+        self.redis_client.delete(system_key)
+        self.redis_client.srem(systems_set_key, app)
+        
+        return True
 
 
 def get_provider_manager():

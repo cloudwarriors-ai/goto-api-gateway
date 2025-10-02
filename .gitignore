@@ -22,6 +22,7 @@ logs/
 archive/
 debug/
 openapi-spec/
+tmp/
 
 # Editor/OS
 .DS_Store
